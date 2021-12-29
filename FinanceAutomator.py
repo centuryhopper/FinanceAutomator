@@ -3,159 +3,116 @@ import json
 import datetime
 import re
 import pandas as pd
-from Models import Transaction, Statement, statement_from_json, transaction_from_json
+import numpy as np
+import os
+from Models import Transaction, transaction_from_json
 from datetime import date
+
 '''
 json.load => returns a dict obj from a json file
 json.dump => writes a dict obj to a file in json format
+
+Script Functionality: calculate the net total spent on the given month (add up all the 'debit' and subtract 'credit' from it)
+Your personal profit, p, will be your monthly income, m, minus the net total spent, n, so p = m - n
+
+TODO: get monthly income from checkings account csv
+
 '''
-# transactions to statements (goal)
-data = {}
-transactions = []
+
+# key: string, value: list of dicts
+transactions = {}
+
 try:
     with open('transactions.json') as json_file:
-        data = json.load(json_file)
-        for info in data["Transactions"]:
-            transactions.append(transaction_from_json(info))
-    with open('statements.json') as json_file:
-        data = json.load(json_file)
-        for info in data["Statements"]:
-            statements.append(statement_from_json(info))
-except:
-    print("Exception")
+        transactions = json.load(json_file)
+except Exception as e:
+    print(e)
 
-#region getFloat(lst)
-def getFloat(lst):
-    try:
-        list_ = lst.split(".")
-        amount = ""
-        for num in list_:
-            amount = amount + num
-        amount = amount.split(",")
-        amount = float(amount[0] + "." + amount[1])
-        return amount
-    except:
-        return 0.0
-#endregion
-
-df = pd.read_csv('exports/export.csv')
+df = pd.read_csv('exports/credit_card.csv')
 df['Date'] = pd.to_datetime(df['Date'])
 df['Date'] = df['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
 df['Account_Number'] = '9190'
 df.drop('Check Number', axis=1, inplace=True)
 # print(len(df['Date'][0].strftime('%Y-%m-%d')),df['Date'][0].strftime('%Y-%m-%d'))
+
+df['raw_amt'] = df['Amount'].copy()
+df['raw_amt'] = df['raw_amt'].apply(lambda x: float(x[1:]) if x[0] == '$' else -float(x.strip('()')[1:]))
 # print(df)
+netTotalSpent = df['raw_amt'].sum()
+print(f'netTotalSpent: {netTotalSpent}')
+df.drop('raw_amt', axis=1, inplace=True)
+
+
+
+monthlyIncome = 0
+df2 = pd.read_csv('exports/checkings.csv')
+df2['to_add'] = np.where(df2['Description'].str.startswith('EDI'), df2['Amount'].str[1:], '0.0')
+df2['to_add'] = df2['to_add'].astype(float)
+# print(df2)
+
+monthlyIncome = df2['to_add'].sum()
+print(f'monthly income: {monthlyIncome}')
+
+print(f'personal profit: {monthlyIncome - netTotalSpent}')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 for row in df.itertuples():
-    # print(row)
-    # print(row[0], row[1], row[2], row[3], row[4], row[5])
-    if len(row) > 0:
-        date_ = row[1]
-        account_num = row[5]
+    # print(type(row),row)
+    if row:
+        date = row[1]
         transactionType = row[2]
+        description = row[3]
         # drop any parentheses. They represent credit
-        # formatAmt = row[4].strip('()')
-        # drop the dollar sign
         transaction_amount = row[4].strip('()')
+        account_num = row[5]
 
         # transaction obj
         transaction = Transaction(
-            name=transactionType,
+            description=description,
+            transactionType=transactionType,
             amount=transaction_amount,
-            date=date_,
+            date=date,
             account_number=account_num,
         )
 
+        transactionName = transaction.description.split()[0]
+
+        if transactionName not in transactions:
+            transactions[transactionName] = []
+
         # maintain transaction uniqueness
         exists = False
-        for transfer in transactions:
-            if transfer.date == transaction.date:
-                if transfer.name == transaction.name:
-                    if transfer.amount == transaction.amount:
+        for transactionDict in transactions[transactionName]:
+            if transactionDict.get('date') == transaction.date:
+                if transactionDict.get('transaction_type') == transaction.transactionType:
+                    if transactionDict.get('amount') == transaction.amount:
                         exists = True
-        if exists != True:
-                transactions.append(transaction)
+        if not exists:
+            transactions[transactionName].append(transaction.serialize())
 
-for transaction in transactions:
-    print(transaction)
+for k,v in transactions.items():
+    transactions[k] = sorted(v,key=lambda x:x['date'])
 
-
-states = []
-
-#region  createTransactionsJson()
+#region createTransactionsJson()
 def createTransactionsJson():
     with open('transactions.json', 'w') as json_file:
-        data = {}
-        data["Transactions"] = []
-        for transfer in transactions:
-            date_day = datetime.datetime.strptime(transfer.date, "%Y-%M-%d").date().strftime("%Y%m")
-            # statement object
-            statement = Statement(date_day, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            data["Transactions"].append(transfer.serialize())
-            exists = False
-            for stat_ in states:
-                if stat_.date == date_day:
-                    statement = stat_
-            statement.create_statement(transfer)
-            statement.set_ending_balance_month()
-            for state in states:
-                if state.date == statement.date:
-                    exists = True
-            if not exists:
-                states.append(statement)
-        json.dump(data, json_file, sort_keys=True, indent=4)
+        json.dump(transactions, json_file, sort_keys=True, indent=4)
 
 #endregion
 
 createTransactionsJson()
 
-statements = sorted(
-    states,
-    key=lambda x: datetime.datetime.strptime(x.date, '%Y%m').date(), reverse=True
-)
 
-#region createStatementsJson()
-def createStatementsJson():
-    with open('statements.json', 'w') as json_file:
-        data = {}
-        data["Statements"] = []
-        for stat_ in statements:
-            data["Statements"].append(stat_.serialize())
-        json.dump(data, json_file, sort_keys=True, indent=4)
-
-#endregion
-
-# createStatementsJson()
-
-#region calculations()
-def calculations():
-    total_income = 0.0
-    total_expenses = 0.0
-    total_taxes = 0.0
-    taxes_paid = 0.0
-    salary_taken = 0.0
-    total_withdrawls = 0.0
-    for stat_ in statements:
-        total_income = total_income + stat_.income
-        total_expenses = total_expenses + stat_.buisiness_expenses
-        salary_taken = salary_taken + stat_.salary
-        taxes_paid = taxes_paid + stat_.tax_paid
-        total_withdrawls = total_withdrawls + stat_.withdrew
-    total_taxes = (salary_taken / 2) * 3 - taxes_paid
-    # print(str(total_withdrawls) + " - " + str(taxes_paid) + " = " + str(total_withdrawls - taxes_paid))
-    total_withdrawls = total_withdrawls - taxes_paid
-    total_net_income = (total_income + total_expenses) + salary_taken + (total_taxes)
-    potential_salary = (total_net_income + taxes_paid) * 0.4
-    print("\n"*3)
-    print("Total income: " + str(total_income))
-    print("Total NET income: " + str(total_net_income))
-    print("Total expenses: " + str(total_expenses))
-    print("Total tax to pay: " + str(total_taxes))
-    print("Potential salary: " + str(potential_salary))
-    print("Salary taken: " + str(salary_taken))
-    print("Total withdrawls: " + str(total_withdrawls))
-    print("\n"*3)
-
-#endregion
-
-# calculations()
